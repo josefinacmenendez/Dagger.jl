@@ -7,7 +7,7 @@ import Random: randperm
 
 import ..Dagger
 import ..Dagger: Context, Processor, Thunk, WeakThunk, ThunkFuture, ThunkFailedException, Chunk, OSProc, AnyScope
-import ..Dagger: order, free!, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, unrelease, procs, move, capacity, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
+import ..Dagger: order, free!, dependents, noffspring, istask, inputs, unwrap_weak_checked, affinity, tochunk, timespan_start, timespan_finish, unrelease, procs, move, chunktype, processor, default_enabled, get_processors, get_parent, execute!, rmprocs!, addprocs!, thunk_processor, constrain, cputhreadtime
 
 const OneToMany = Dict{Thunk, Set{Thunk}}
 
@@ -589,7 +589,7 @@ function schedule!(ctx, state, procs=procs_to_use(ctx))
         if length(procs) > fallback_threshold
             @goto fallback
         end
-        local_procs = unique(vcat([Dagger.get_processors(gp) for gp in procs]...))
+        local_procs = unique(vcat([collect(Dagger.get_processors(gp)) for gp in procs]...))
         if length(local_procs) > fallback_threshold
             @goto fallback
         end
