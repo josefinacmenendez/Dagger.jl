@@ -287,26 +287,29 @@ function can_use_proc(task, gproc, proc, opts, scope)
     return true
 end
 
-function has_capacity(state, p, gp, procutil, sig)
+function has_capacity(state, p, gp, time_util, alloc_util, sig)
     T = typeof(p)
     # FIXME: MaxUtilization
-    extra_util = round(UInt64, get(procutil, T, 1) * 1e9)
-    real_util = state.worker_pressure[gp][p]
-    if (T === Dagger.ThreadProc) && haskey(state.function_cost_cache, sig)
-        # Assume that the extra pressure is between estimated and measured
-        # TODO: Generalize this to arbitrary processor types
-        extra_util = min(extra_util, state.function_cost_cache[sig])
+    est_time_util = round(UInt64, if haskey(time_util, T)
+        time_util[T] * 1000^3
+    else
+        get(state.signature_time_cost, sig, 1000^3)
+    end)
+    #= FIXME
+    storage = storage_resource(p)
+    real_alloc_util = state.worker_storage_pressure[gp][storage]
+    real_alloc_cap = state.worker_storage_capacity[gp][storage]
+    =#
+    est_alloc_util = get(alloc_util, T) do
+        get(state.signature_alloc_cost, sig, 0)
     end
-    # TODO: update real_util based on loadavg
-    cap = typemax(UInt64)
-    #= TODO
-    cap = state.worker_capacity[gp][T]
-    if ((extra_util isa MaxUtilization) && (real_util > 0)) ||
-       ((extra_util isa Real) && (extra_util + real_util > cap))
-        return false, cap, extra_util
+    #= FIXME
+    if est_alloc_util + real_alloc_util > real_alloc_cap
+        # TODO: Estimate if cached data can be swapped to storage
+        return false, est_time_util, est_alloc_util
     end
     =#
-    return true, cap, extra_util
+    return true, est_time_util, est_alloc_util
 end
 
 function populate_processor_cache_list!(state, procs)
@@ -381,7 +384,7 @@ function estimate_task_costs(state, procs, task)
     transfer_costs = Dict(proc=>impute_sum([affinity(chunk)[2] for chunk in filter(c->get_parent(processor(c))!=get_parent(proc), chunks)]) for proc in procs)
 
     # Estimate total cost to move data and get task running after currently-scheduled tasks
-    costs = Dict(proc=>state.worker_pressure[get_parent(proc).pid][proc]+(tx_cost/tx_rate) for (proc, tx_cost) in transfer_costs)
+    costs = Dict(proc=>state.worker_time_pressure[get_parent(proc).pid][proc]+(tx_cost/tx_rate) for (proc, tx_cost) in transfer_costs)
 
     # Shuffle procs around, so equally-costly procs are equally considered
     P = randperm(length(procs))
@@ -392,3 +395,70 @@ function estimate_task_costs(state, procs, task)
 
     return procs, costs
 end
+
+"""
+    walk_data(f, x)
+
+Walks the data contained in `x` in DFS fashion, and executes `f` at each object
+that hasn't yet been seen.
+"""
+function walk_data(f, @nospecialize(x))
+    seen = IdDict{Any,Nothing}()
+    to_visit = Any[x]
+
+    while !isempty(to_visit)
+        y = pop!(to_visit)
+        walk_data_inner(f, y, seen, to_visit)
+    end
+end
+function walk_data_inner(f, x, seen, to_visit)
+    if !isstructtype(typeof(x))
+        return
+    end
+    for field in fieldnames(typeof(x))
+        isdefined(x, field) || continue
+        next = getfield(x, field)
+        #Core.println("$(typeof(next))")
+        if !haskey(seen, next)
+            seen[next] = nothing
+            if f(next)
+                push!(to_visit, next)
+            end
+        end
+    end
+end
+function walk_data_inner(f, x::Union{Array,Tuple}, seen, to_visit)
+    for idx in firstindex(x):lastindex(x)
+        if x isa Array
+            isassigned(x, idx) || continue
+        end
+        next = x[idx]
+        if !haskey(seen, next)
+            seen[next] = nothing
+            if f(next)
+                push!(to_visit, next)
+            end
+        end
+    end
+end
+walk_data_inner(f, ::DataType, seen, to_visit) = nothing
+
+"Walks `x` and returns a `Bool` indicating whether `x` is safe to serialize."
+function walk_storage_safe(@nospecialize(x))
+    safe = Ref{Bool}(true)
+    walk_data(x) do y
+        if !storage_safe(y)
+            safe[] = false
+            false
+        else
+            true
+        end
+    end
+    safe[]
+end
+storage_safe(::Any) = true
+storage_safe(::Thunk) = false
+storage_safe(::Dagger.EagerThunk) = false
+storage_safe(::Chunk) = false
+storage_safe(::MemPool.DRef) = false
+storage_safe(::Ptr) = false

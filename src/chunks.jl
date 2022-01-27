@@ -243,12 +243,19 @@ Base.map(f, s::Shard) = [Dagger.spawn(f, c) for c in values(s.chunks)]
 ### Core Stuff
 
 """
-    tochunk(x, proc; persist=false, cache=false) -> Chunk
+    tochunk(x, proc::Processor, scope::AbstractScope; persist=false, cache=false, kwargs...) -> Chunk
 
-Create a chunk from sequential object `x` which resides on `proc`.
+Create a chunk from data `x` which resides on `proc`.
 """
-function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cache=false, kwargs...) where {X,P,S}
-    ref = poolset(x; destroyonevict=persist ? false : cache, kwargs...)
+function tochunk(x::X, proc::P=OSProc(), scope::S=AnyScope(); persist=false, cache=false, device=nothing, kwargs...) where {X,P,S}
+    if device === nothing
+        device = if Sch.walk_storage_safe(x)
+            MemPool.GLOBAL_DEVICE[]
+        else
+            MemPool.CPURAMDevice()
+        end
+    end
+    ref = poolset(x; destroyonevict=persist ? false : cache, device, kwargs...)
     Chunk{X,typeof(ref),P,S}(X, domain(x), ref, proc, scope, persist)
 end
 tochunk(x::Union{Chunk, Thunk}, proc=nothing, scope=nothing) = x

@@ -185,7 +185,7 @@ function _add_thunk!(ctx, state, task, tid, (f, args, kwargs, future, ref))
     GC.@preserve _args begin
         thunk = Thunk(f, _args...; kwargs...)
         # Create a `DRef` to `thunk` so that the caller can preserve it
-        thunk_ref = poolset(thunk)
+        thunk_ref = poolset(thunk; device=MemPool.CPURAMDevice())
         thunk_id = ThunkID(thunk.id, thunk_ref)
         state.thunk_dict[thunk.id] = WeakThunk(thunk)
         reschedule_inputs!(state, thunk)
