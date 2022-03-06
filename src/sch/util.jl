@@ -236,15 +236,10 @@ function report_catch_error(err, desc=nothing)
     write(stderr, iob)
 end
 
-fn_type(x::Chunk) = x.chunktype
-fn_type(x) = typeof(x)
+chunktype(x) = typeof(x)
 function signature(task::Thunk, state)
-    sig = Any[fn_type(task.f)]
-    for input in task.inputs
-        input = unwrap_weak_checked(input)
-        input = istask(input) ? state.cache[input] : input
-        push!(sig, fn_type(input))
-    end
+    sig = Any[chunktype(task.f)]
+    append!(sig, collect_task_inputs(state, task))
     sig
 end
 
@@ -270,7 +265,7 @@ function can_use_proc(task, gproc, proc, opts, scope)
     end
 
     # Check against single
-    if opts.single != 0
+    if opts.single !== nothing
         if gproc.pid != opts.single
             @debug "Rejected $proc: gproc.pid != single"
             return false
@@ -290,7 +285,7 @@ end
 function has_capacity(state, p, gp, time_util, alloc_util, sig)
     T = typeof(p)
     # FIXME: MaxUtilization
-    est_time_util = round(UInt64, if haskey(time_util, T)
+    est_time_util = round(UInt64, if time_util !== nothing && haskey(time_util, T)
         time_util[T] * 1000^3
     else
         get(state.signature_time_cost, sig, 1000^3)
@@ -300,7 +295,9 @@ function has_capacity(state, p, gp, time_util, alloc_util, sig)
     real_alloc_util = state.worker_storage_pressure[gp][storage]
     real_alloc_cap = state.worker_storage_capacity[gp][storage]
     =#
-    est_alloc_util = get(alloc_util, T) do
+    est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
+        alloc_util[T]
+    else
         get(state.signature_alloc_cost, sig, 0)
     end
     #= FIXME
@@ -352,29 +349,27 @@ function impute_sum(xs)
     total + nothing_count * total / something_count
 end
 
+"Collects all arguments for `task`, converting Thunk inputs to Chunks."
+function collect_task_inputs(state, task)
+    inputs = Any[]
+    for input in task.inputs
+        input = unwrap_weak_checked(input)
+        push!(inputs, istask(input) ? state.cache[input] : input)
+    end
+    inputs
+end
+
 """
 Estimates the cost of scheduling `task` on each processor in `procs`. Considers
 current estimated per-processor compute pressure, and transfer costs for each
 `Chunk` argument to `task`. Returns `(procs, costs)`, with `procs` sorted in
 order of ascending cost.
 """
-function estimate_task_costs(state, procs, task)
+function estimate_task_costs(state, procs, task, inputs)
     tx_rate = state.transfer_rate[]
 
     # Find all Chunks
-    chunks = Chunk[]
-    for input in task.inputs
-        input = unwrap_weak_checked(input)
-        input_raw = istask(input) ? state.cache[input] : input
-        if input_raw isa Chunk
-            push!(chunks, input_raw)
-        end
-    end
-    #=
-    inputs = map(@nospecialize(input)->istask(input) ? state.cache[input] : input,
-                 map(@nospecialize(x)->unwrap_weak_checked(x), task.inputs))
-    chunks = filter(@nospecialize(t)->isa(t, Chunk), inputs)
-    =#
+    chunks = filter(t->isa(t, Chunk), inputs)
 
     # Estimate network transfer costs based on data size
     # N.B. `affinity(x)` really means "data size of `x`"
