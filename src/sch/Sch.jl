@@ -54,8 +54,8 @@ Fields:
 - `thunk_dict::Dict{Int, WeakThunk}` - Maps from thunk IDs to a `Thunk`
 - `node_order::Any` - Function that returns the order of a thunk
 - `worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}` - Maps from worker ID to processor pressure
-- `worker_storage_pressure::Dict{Int,Dict{StorageResource,UInt64}}` - Maps from worker ID to storage resource pressure
-- `worker_storage_capacity::Dict{Int,Dict{StorageResource,UInt64}}` - Maps from worker ID to storage resource capacity
+- `worker_storage_pressure::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource pressure
+- `worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}` - Maps from worker ID to storage resource capacity
 - `worker_loadavg::Dict{Int,NTuple{3,Float64}}` - Worker load average
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
 - `procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}` - Cached linked list of processors ready to be used
@@ -79,8 +79,8 @@ struct ComputeState
     thunk_dict::Dict{Int, WeakThunk}
     node_order::Any
     worker_time_pressure::Dict{Int,Dict{Processor,UInt64}}
-    worker_storage_pressure::Dict{Int,Dict{StorageResource,UInt64}}
-    worker_storage_capacity::Dict{Int,Dict{StorageResource,UInt64}}
+    worker_storage_pressure::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
+    worker_storage_capacity::Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}
     worker_loadavg::Dict{Int,NTuple{3,Float64}}
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
     procs_cache_list::Base.RefValue{Union{ProcessorCacheEntry,Nothing}}
@@ -105,8 +105,8 @@ function start_state(deps::Dict, node_order, chan)
                          Dict{Int, WeakThunk}(),
                          node_order,
                          Dict{Int,Dict{Processor,UInt64}}(),
-                         Dict{Int,Dict{StorageResource,UInt64}}(),
-                         Dict{Int,Dict{StorageResource,UInt64}}(),
+                         Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
+                         Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}(),
                          Dict{Int,NTuple{3,Float64}}(),
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
                          Ref{Union{ProcessorCacheEntry,Nothing}}(nothing),
@@ -288,8 +288,8 @@ function init_proc(state, p, log_sink)
             state.worker_time_pressure[p.pid][proc] = 0
         end
 
-        state.worker_storage_pressure[p.pid] = Dict{StorageResource,UInt64}()
-        state.worker_storage_capacity[p.pid] = Dict{StorageResource,UInt64}()
+        state.worker_storage_pressure[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
+        state.worker_storage_capacity[p.pid] = Dict{Union{StorageResource,Nothing},UInt64}()
         #= FIXME
         for storage in get_storage_resources(gproc)
             pressure, capacity = remotecall_fetch(gproc.pid, storage) do storage
@@ -508,10 +508,9 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options)
             node = unwrap_weak_checked(state.thunk_dict[thunk_id])
             if metadata !== nothing
                 state.worker_time_pressure[pid][proc] = metadata.time_pressure
-                # FIXME: Use thunk storage device (which is a Chunk)
-                #to_storage = ...
-                #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
-                #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
+                to_storage = node.options.storage
+                state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
+                state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
                 state.worker_loadavg[pid] = metadata.loadavg
                 sig = signature(node, state)
                 state.signature_time_cost[sig] = (metadata.threadtime + get(state.signature_time_cost, sig, 0)) ÷ 2
@@ -966,7 +965,7 @@ function do_task(to_proc, comm)
     from_proc = OSProc()
     Tdata = Any[]
     for x in data
-        push!(Tdata, x isa Chunk ? chunktype(x) : x)
+        push!(Tdata, chunktype(x))
     end
     f = isdefined(Tf, :instance) ? Tf.instance : nothing
 
@@ -991,12 +990,13 @@ function do_task(to_proc, comm)
         let est_alloc_util=Base.format_bytes(est_alloc_util),
             real_alloc_util=Base.format_bytes(real_alloc_util),
             storage_cap=Base.format_bytes(storage_cap)
-            "[$(myid())] $f ($thunk_id) $msg: $est_alloc_util | $real_alloc_util/$storage_cap"
+            "[$(myid()), $thunk_id] $f($Tdata) $msg: $est_alloc_util | $real_alloc_util/$storage_cap"
         end
     end
 
     lock(TASK_SYNC) do
         # FIXME: Make this guaranteed to make progress
+        # TODO: Instead, implement a priority queue, ordered by est_alloc_util
         hang_ctr = 0
         while true
 
@@ -1164,7 +1164,7 @@ function do_task(to_proc, comm)
         storage_capacity=storage_cap,
         loadavg=((Sys.loadavg()...,) ./ Sys.CPU_THREADS),
         threadtime=threadtime,
-        gc_allocd=gc_allocd,
+        gc_allocd=gc_allocd + (isa(result_meta, Chunk) ? result_meta.handle.size : 0),
         transfer_rate=(transfer_size[] > 0 && transfer_time[] > 0) ? round(UInt64, transfer_size[] / (transfer_time[] / 10^9)) : nothing,
     )
     (result_meta, metadata)

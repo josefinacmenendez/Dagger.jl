@@ -239,7 +239,9 @@ end
 chunktype(x) = typeof(x)
 function signature(task::Thunk, state)
     sig = Any[chunktype(task.f)]
-    append!(sig, collect_task_inputs(state, task))
+    for input in collect_task_inputs(state, task)
+        push!(sig, chunktype(input))
+    end
     sig
 end
 
@@ -290,19 +292,16 @@ function has_capacity(state, p, gp, time_util, alloc_util, sig)
     else
         get(state.signature_time_cost, sig, 1000^3)
     end)
-    #= FIXME
-    storage = storage_resource(p)
-    real_alloc_util = state.worker_storage_pressure[gp][storage]
-    real_alloc_cap = state.worker_storage_capacity[gp][storage]
-    =#
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
         alloc_util[T]
     else
         get(state.signature_alloc_cost, sig, 0)
     end
-    #= FIXME
+    #= FIXME: Estimate if cached data can be swapped to storage
+    storage = storage_resource(p)
+    real_alloc_util = state.worker_storage_pressure[gp][storage]
+    real_alloc_cap = state.worker_storage_capacity[gp][storage]
     if est_alloc_util + real_alloc_util > real_alloc_cap
-        # TODO: Estimate if cached data can be swapped to storage
         return false, est_time_util, est_alloc_util
     end
     =#
