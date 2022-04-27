@@ -326,17 +326,23 @@ function Base.sort(v::ArrayOp;
                batchsize=max(2, nworkers()),
                nsamples=2000,
                order::Ordering=default_ord)
+
     v1 = compute(v)
     ord = Base.Sort.ord(lt,by,rev,order)
     nchunks = nchunks === nothing ? length(v1.chunks) : nchunks
     cs = dsort_chunks(v1.chunks, nchunks, nsamples,
                       order=ord, merge=(x,y)->merge_sorted(ord, x,y))
+    print(typeof(cs))
+	
     foreach(persist!, cs)
-    t=delayed((xs...)->[xs...]; meta=true)(cs...)
+
+    t= Dagger.@spawn meta=true ((xs...)->[xs...])(cs...)
     # `compute(t)` only computes references to materialized version of `cs`
     # we don't want the scheduler to think that `cs`s' job is done
     # so we call persist! above
-    chunks = compute(t)
+
+    chunks = fetch(t)
+    @show typeof.(chunks)
     dmn = ArrayDomain((1:sum(length(domain(c)) for c in chunks),))
     DArray(eltype(v1), dmn, map(domain, chunks), chunks)
 end
